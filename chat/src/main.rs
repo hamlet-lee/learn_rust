@@ -3,13 +3,10 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool};
 use std::{thread, time};
 
-#[macro_use]
 extern crate log;
 extern crate env_logger;
 
@@ -20,13 +17,13 @@ extern crate env_logger;
 // run with: RUST_LOG=debug cargo run ...
 fn readline() -> String {
     let mut line: String = String::new();
-    io::stdin().read_line(&mut line);
+    io::stdin().read_line(&mut line).unwrap();
     // remove ending \n
     line[0..line.len()-1].to_owned()
 }
 
 fn flush() {
-    io::stdout().flush();
+    io::stdout().flush().unwrap();
 }
 
 enum Action {
@@ -35,11 +32,11 @@ enum Action {
 }
 
 
-fn read_stream_line<F:FnMut(&str) -> Action> (mut stream: TcpStream, mut line_processor: F) {
+fn read_stream_line<F:FnMut(&str) -> Action> (mut stream: TcpStream, mut line_processor: F) -> io::Result<usize> {
     let mut buf = [0; 512];
     let mut cur_line: Vec<u8> = Vec::new();
     'outer: loop {
-        let bytes_read = stream.read(&mut buf).unwrap();
+        let bytes_read = stream.read(&mut buf)?;
         if bytes_read <= 0 {
             log::debug!("bytes_read = {}", bytes_read);
             break;
@@ -68,6 +65,7 @@ fn read_stream_line<F:FnMut(&str) -> Action> (mut stream: TcpStream, mut line_pr
         }
     }
     log::debug!("read_stream_line end!");
+    Ok(0)
 }
 
 // fn handle_client(mut stream: TcpStream) {
@@ -113,12 +111,10 @@ fn read_stream_line<F:FnMut(&str) -> Action> (mut stream: TcpStream, mut line_pr
 // }
 
 fn handle_client(stream: TcpStream) {
-    let mut end_of_chat = false;
     let mut client_name: String = "UNKNOWN".to_owned();
     
     read_stream_line(stream, move |s| {
         if s == "bye" {
-            end_of_chat = true;
             println!("{} 离开了 ...", client_name);
             Action::STOP
         } else if s.starts_with("name: ") {
@@ -129,8 +125,7 @@ fn handle_client(stream: TcpStream) {
             println!("{} 说: {}", client_name, s);
             Action::CONTINUE
         }
-    })
-    
+    }).unwrap_or(0);
 }
 
 fn serve(port: u16) -> std::io::Result<()> {
@@ -146,11 +141,11 @@ fn serve(port: u16) -> std::io::Result<()> {
     Ok(())
 }
 
-fn recv_print(mut stream: TcpStream) {
+fn recv_print(stream: TcpStream) {
     read_stream_line(stream, |s| {
         println!("{}", s);
         Action::CONTINUE
-    })
+    }).unwrap_or(0);
 }
 
 fn client(host:&str, port: u16) {
@@ -160,9 +155,9 @@ fn client(host:&str, port: u16) {
     // 参考：https://stackoverflow.com/questions/28300742/how-do-i-share-a-socket-between-a-thread-and-a-function
     // 可以 clone stream !
 
-    let mut stream_for_read = stream.try_clone().unwrap();
-    let mut has_end = Arc::new(Mutex::new(false));
-    let mut has_end2 = has_end.clone();
+    let stream_for_read = stream.try_clone().unwrap();
+    let has_end = Arc::new(Mutex::new(false));
+    let has_end2 = has_end.clone();
     std::thread::spawn(move || {
         recv_print(stream_for_read);
         log::debug!("setting has_end = true");
@@ -174,13 +169,13 @@ fn client(host:&str, port: u16) {
     print!("your name: ");
     flush();
     let name = readline();
-    stream.write(format!("name: {}\n", name).as_bytes());
+    stream.write(format!("name: {}\n", name).as_bytes()).unwrap();
     'outer: loop {
         print!("your message: ");
         flush();
         let input = readline();
-        stream.write(input.as_bytes());
-        stream.write("\n".as_bytes());
+        stream.write(input.as_bytes()).unwrap();
+        stream.write("\n".as_bytes()).unwrap();
         // 等待100毫秒，这样如果has end触发了，就结束。
         thread::sleep(time::Duration::from_millis(100));
 
@@ -199,7 +194,7 @@ fn usage() {
     println!("usage 2: client <host> <port>");
 }
 fn main() {
-    env_logger::init();
+    env_logger::init().unwrap();
     let args: Vec<String> = env::args().collect();
     if args.len() == 1 {
         usage();
@@ -207,7 +202,7 @@ fn main() {
     }
     if args[1] == "serve" {
         let port = args[2].parse::<u16>().unwrap();
-        serve(port);
+        serve(port).unwrap();
     } else if args[1] == "client" {
         let host = &args[2];
         let port = args[3].parse::<u16>().unwrap();
