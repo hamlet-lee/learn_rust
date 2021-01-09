@@ -3,14 +3,21 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::thread;
 use std::net::Shutdown;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool};
+use std::{thread, time};
 
-// learn from https://www.jianshu.com/p/ec219de3132d
+#[macro_use]
+extern crate log;
+extern crate env_logger;
 
+// learn tcpstream from https://www.jianshu.com/p/ec219de3132d
+
+// learn debug log: https://rust-lang-nursery.github.io/rust-cookbook/development_tools/debugging/log.html
+// and https://blog.csdn.net/s_lisheng/article/details/78250340
+// run with: RUST_LOG=debug cargo run ...
 fn readline() -> String {
     let mut line: String = String::new();
     io::stdin().read_line(&mut line);
@@ -34,12 +41,13 @@ fn read_stream_line<F:FnMut(&str) -> Action> (mut stream: TcpStream, mut line_pr
     'outer: loop {
         let bytes_read = stream.read(&mut buf).unwrap();
         if bytes_read <= 0 {
+            log::debug!("bytes_read = {}", bytes_read);
             break;
         }
-        println!("read len: {}", bytes_read);
+        log::debug!("read len: {}", bytes_read);
         for pos in 0..bytes_read {
             let ch = buf[pos];
-            println!("ch={}", ch);
+            log::debug!("ch={}", ch);
             cur_line.push(ch);
             if ch == '\n' as u8 {
                 let mut content_len = cur_line.len() - 1;
@@ -59,7 +67,7 @@ fn read_stream_line<F:FnMut(&str) -> Action> (mut stream: TcpStream, mut line_pr
             }
         }
     }
-    println!("read_stream_line end!");
+    log::debug!("read_stream_line end!");
 }
 
 // fn handle_client(mut stream: TcpStream) {
@@ -157,10 +165,10 @@ fn client(host:&str, port: u16) {
     let mut has_end2 = has_end.clone();
     std::thread::spawn(move || {
         recv_print(stream_for_read);
-        println!("setting has_end = true");
+        log::debug!("setting has_end = true");
         let mut he = has_end2.lock().unwrap();
         *he = true;
-        println!("setted has_end ...");
+        log::debug!("setted has_end ...");
     });
 
     print!("your name: ");
@@ -168,18 +176,21 @@ fn client(host:&str, port: u16) {
     let name = readline();
     stream.write(format!("name: {}\n", name).as_bytes());
     'outer: loop {
-        {
-            let he = has_end.lock().unwrap();
-            println!("check has_end = {}", *he);
-            if *he  {
-                break 'outer;
-            }
-        }
         print!("your message: ");
         flush();
         let input = readline();
         stream.write(input.as_bytes());
         stream.write("\n".as_bytes());
+        // 等待100毫秒，这样如果has end触发了，就结束。
+        thread::sleep(time::Duration::from_millis(100));
+
+        {
+            let he = has_end.lock().unwrap();
+            log::debug!("check has_end = {}", *he);
+            if *he  {
+                break 'outer;
+            }
+        }
     }
 }
 
@@ -188,6 +199,7 @@ fn usage() {
     println!("usage 2: client <host> <port>");
 }
 fn main() {
+    env_logger::init();
     let args: Vec<String> = env::args().collect();
     if args.len() == 1 {
         usage();
