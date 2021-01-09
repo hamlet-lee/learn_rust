@@ -18,14 +18,14 @@ fn readline() -> String {
 }
 
 fn main() {
-    print!("您有几种选择？");
+    print!("您有几种选择（请输入任意数字，例如 2、3、4、...）？");
     flush();
     let line = readline();
     let 备选数 = i32::from_str(line.trim()).unwrap();
 
     let mut exp:Vec<String> = Vec::new();
     for i in 0..备选数 {
-       print!("{} 代表：", i+1);
+       print!("第{}种选择代表什么（请输入描述性文字，例如：苹果、北京、...）：", i+1);
        flush();
        let line = readline();
        let e = line.trim().to_string();
@@ -55,7 +55,7 @@ fn main() {
     let mut rng = rand::thread_rng();
     let c = rng.gen_range(0, 备选数);
     let e = &(exp[c as usize]);
-    println!("给你选择了 {} => {}。惊不惊喜！意不意外！",
+    println!("为您选择了 {} （{}）。惊不惊喜！意不意外！",
          c + 1, e);
     print!("按回车结束...");
     flush();
