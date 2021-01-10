@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::collections::HashMap;
+// use std::time::Duration;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
 use std::env;
@@ -140,7 +141,7 @@ fn message_sender (mut stream: TcpStream, rx: Receiver<Msg>) {
 fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
     let mut client_name: String = "UNKNOWN".to_owned();
 
-    let (rx, tx) = {
+    let (rx, id) = {
         let mut mp = arc_mp.lock().unwrap();
         mp.new_receiver()
     };
@@ -152,7 +153,7 @@ fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
 
     read_stream_line(stream, move |s| {
 
-        let m = {
+        let mut m = {
             arc_mp.lock().unwrap()
         };
 
@@ -160,7 +161,7 @@ fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
             let msg = format!("{} 离开了 ...", client_name);
             println!("{}", msg);
             m.push_msg(&msg);
-            tx.send(Msg::EndMsg).unwrap();
+            m.close(id);
             Action::STOP
         } else if s.starts_with("name: ") {
             client_name = s["name: ".len()..].to_owned();
@@ -185,27 +186,38 @@ enum Msg {
 }
 
 struct MessagePusher {
-    all_tx: Vec<Sender<Msg>>
+    sender_map: HashMap<u64, Sender<Msg>>,
+    next_id: u64
 }
 
 impl MessagePusher {
     fn new() -> MessagePusher {
         MessagePusher {
-            all_tx: Vec::new()
+            sender_map: HashMap::new(),
+            next_id: 1
         }
     }
 
-    fn new_receiver(&mut self) -> (Receiver<Msg>, Sender<Msg>) {
+    fn new_receiver(&mut self) -> (Receiver<Msg>, u64) {
         let (tx, rx) = mpsc::channel();
-        self.all_tx.push(tx.clone());
-        (rx, tx)
+        let id = self.next_id;
+        self.next_id += 1;
+        self.sender_map.insert(id, tx.clone());
+        (rx, id)
     }
 
     fn push_msg(&self, msg: &str) {
         log::debug!("push_msg : {}", msg);
-        for tx in &self.all_tx {
-            log::debug!("tx.send : {}", msg);
+        for (id, tx) in &self.sender_map {
+            log::debug!("tx({}).send : {}", id, msg);
             tx.send(Msg::TextMsg(msg.to_owned())).unwrap();
+        }
+    }
+
+    fn close(&mut self, id: u64) {
+        let sender = self.sender_map.remove(&id);
+        if let Some(s) = sender {
+            s.send(Msg::EndMsg).unwrap();
         }
     }
 }
