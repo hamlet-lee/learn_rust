@@ -119,19 +119,28 @@ fn read_stream_line<F:FnMut(&str) -> Action> (mut stream: TcpStream, mut line_pr
 //     }
 // }
 
-fn message_sender (mut stream: TcpStream, rx: Receiver<String>) {
-    loop {
+fn message_sender (mut stream: TcpStream, rx: Receiver<Msg>) {
+    'outer: loop {
         let msg = rx.recv().unwrap();
-        log::debug!("stream.write(rx.recv) : {}", msg);
-        stream.write(msg.as_bytes());
-        stream.write("\n".as_bytes());
+        match msg {
+            Msg::TextMsg(s) => {
+                log::debug!("stream.write(rx.recv) : {}", s);
+                stream.write(s.as_bytes());
+                stream.write("\n".as_bytes());
+            },
+            Msg::EndMsg => {
+                break 'outer;
+            }
+        }
+
+        // check end
     }
 }
 
 fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
     let mut client_name: String = "UNKNOWN".to_owned();
 
-    let rx = {
+    let (rx, tx) = {
         let mut mp = arc_mp.lock().unwrap();
         mp.new_receiver()
     };
@@ -151,6 +160,7 @@ fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
             let msg = format!("{} 离开了 ...", client_name);
             println!("{}", msg);
             m.push_msg(&msg);
+            tx.send(Msg::EndMsg).unwrap();
             Action::STOP
         } else if s.starts_with("name: ") {
             client_name = s["name: ".len()..].to_owned();
@@ -169,8 +179,13 @@ fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
     
 }
 
+enum Msg {
+    TextMsg (String),
+    EndMsg
+}
+
 struct MessagePusher {
-    all_tx: Vec<Sender<String>>
+    all_tx: Vec<Sender<Msg>>
 }
 
 impl MessagePusher {
@@ -179,17 +194,18 @@ impl MessagePusher {
             all_tx: Vec::new()
         }
     }
-    fn new_receiver(&mut self) -> Receiver<String> {
+
+    fn new_receiver(&mut self) -> (Receiver<Msg>, Sender<Msg>) {
         let (tx, rx) = mpsc::channel();
-        self.all_tx.push(tx);
-        rx
+        self.all_tx.push(tx.clone());
+        (rx, tx)
     }
 
     fn push_msg(&self, msg: &str) {
         log::debug!("push_msg : {}", msg);
         for tx in &self.all_tx {
             log::debug!("tx.send : {}", msg);
-            tx.send(msg.to_owned()).unwrap();
+            tx.send(Msg::TextMsg(msg.to_owned())).unwrap();
         }
     }
 }

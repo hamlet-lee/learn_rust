@@ -1,1 +1,1 @@
-RUST_LOG=info cargo run client localhost 1800
+RUST_LOG=debug cargo run client localhost 1800
