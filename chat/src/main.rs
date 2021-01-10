@@ -1,3 +1,6 @@
+use std::time::Duration;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::Sender;
 use std::env;
 use std::io;
 use std::io::Read;
@@ -6,6 +9,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::{thread, time};
+use std::sync::mpsc;
+use console::Term;
 
 extern crate log;
 extern crate env_logger;
@@ -15,6 +20,10 @@ extern crate env_logger;
 // learn debug log: https://rust-lang-nursery.github.io/rust-cookbook/development_tools/debugging/log.html
 // and https://blog.csdn.net/s_lisheng/article/details/78250340
 // run with: RUST_LOG=debug cargo run ...
+
+
+// learn terminal from https://github.com/mitsuhiko/console
+// or https://crates.io/crates/console
 fn readline() -> String {
     let mut line: String = String::new();
     io::stdin().read_line(&mut line).unwrap();
@@ -110,40 +119,111 @@ fn read_stream_line<F:FnMut(&str) -> Action> (mut stream: TcpStream, mut line_pr
 //     }
 // }
 
-fn handle_client(stream: TcpStream) {
+fn message_sender (mut stream: TcpStream, rx: Receiver<String>) {
+    loop {
+        let msg = rx.recv().unwrap();
+        log::debug!("stream.write(rx.recv) : {}", msg);
+        stream.write(msg.as_bytes());
+        stream.write("\n".as_bytes());
+    }
+}
+
+fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
     let mut client_name: String = "UNKNOWN".to_owned();
+
+    let rx = {
+        let mut mp = arc_mp.lock().unwrap();
+        mp.new_receiver()
+    };
     
+    let stream_for_sender = stream.try_clone().unwrap();
+    thread::spawn( || {
+        message_sender(stream_for_sender, rx);
+    });
+
     read_stream_line(stream, move |s| {
+
+        let m = {
+            arc_mp.lock().unwrap()
+        };
+
         if s == "bye" {
-            println!("{} 离开了 ...", client_name);
+            let msg = format!("{} 离开了 ...", client_name);
+            println!("{}", msg);
+            m.push_msg(&msg);
             Action::STOP
         } else if s.starts_with("name: ") {
             client_name = s["name: ".len()..].to_owned();
-            println!("{} 进来了 ...", client_name);
+            let msg = format!("{} 进来了 ...", client_name);
+            println!("{}", msg);
+            m.push_msg(&msg);
             Action::CONTINUE
         } else {
-            println!("{} 说: {}", client_name, s);
+            let msg = format!("{} 说: {}", client_name, s);
+            println!("{}", msg);
+            m.push_msg(&msg);
             Action::CONTINUE
         }
     }).unwrap_or(0);
+
+    
 }
 
-fn serve(port: u16) -> std::io::Result<()> {
+struct MessagePusher {
+    all_tx: Vec<Sender<String>>
+}
+
+impl MessagePusher {
+    fn new() -> MessagePusher {
+        MessagePusher {
+            all_tx: Vec::new()
+        }
+    }
+    fn new_receiver(&mut self) -> Receiver<String> {
+        let (tx, rx) = mpsc::channel();
+        self.all_tx.push(tx);
+        rx
+    }
+
+    fn push_msg(&self, msg: &str) {
+        log::debug!("push_msg : {}", msg);
+        for tx in &self.all_tx {
+            log::debug!("tx.send : {}", msg);
+            tx.send(msg.to_owned()).unwrap();
+        }
+    }
+}
+
+fn serve(port: u16, arc_mp: Arc<Mutex<MessagePusher>>) -> std::io::Result<()> {
     println!("Listening on port {} ...", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
+
     for stream in listener.incoming() {
         println!("A client is connected!");
         let stream = stream.unwrap();
+        let arc_mp_for_client = arc_mp.clone();
         std::thread::spawn(move || {
-            handle_client(stream);
+            handle_client(stream, arc_mp_for_client);
         });
+
     }
     Ok(())
 }
 
-fn recv_print(stream: TcpStream) {
+fn recv_print(stream: TcpStream, prompt: &str) {
+    let term = Term::stdout();
     read_stream_line(stream, |s| {
-        println!("{}", s);
+        log::debug!("recv_print: {}", s);
+        // println!("{}", s);
+        term.clear_last_lines(1).unwrap();
+        // thread::sleep(Duration::from_millis(1000));
+        term.write_line(s).unwrap();
+        // thread::sleep(Duration::from_millis(1000));
+        term.clear_line().unwrap();
+        // thread::sleep(Duration::from_millis(1000));
+        term.write_str("\n");
+        // thread::sleep(Duration::from_millis(1000));
+        term.write_str(prompt);
         Action::CONTINUE
     }).unwrap_or(0);
 }
@@ -155,27 +235,37 @@ fn client(host:&str, port: u16) {
     // 参考：https://stackoverflow.com/questions/28300742/how-do-i-share-a-socket-between-a-thread-and-a-function
     // 可以 clone stream !
 
+    
+    print!("请输入您的昵称（回车发送）: ");
+    flush();
+    let name = readline();
+    stream.write(format!("name: {}\n", name).as_bytes()).unwrap();
+
     let stream_for_read = stream.try_clone().unwrap();
     let has_end = Arc::new(Mutex::new(false));
     let has_end2 = has_end.clone();
     std::thread::spawn(move || {
-        recv_print(stream_for_read);
+        recv_print(stream_for_read, "请输入信息(回车发送): ");
         log::debug!("setting has_end = true");
         let mut he = has_end2.lock().unwrap();
         *he = true;
         log::debug!("setted has_end ...");
     });
 
-    print!("your name: ");
-    flush();
-    let name = readline();
-    stream.write(format!("name: {}\n", name).as_bytes()).unwrap();
+    let term = Term::stdout();
     'outer: loop {
-        print!("your message: ");
-        flush();
+        // 等待100毫秒，这样如果有信息，可以先显示
+        thread::sleep(time::Duration::from_millis(100));
+
+        // print!("your message: ");
+        // flush();
         let input = readline();
+
+        term.clear_last_lines(1).unwrap();
+
         stream.write(input.as_bytes()).unwrap();
         stream.write("\n".as_bytes()).unwrap();
+
         // 等待100毫秒，这样如果has end触发了，就结束。
         thread::sleep(time::Duration::from_millis(100));
 
@@ -194,15 +284,16 @@ fn usage() {
     println!("usage 2: client <host> <port>");
 }
 fn main() {
-    env_logger::init().unwrap();
+    env_logger::init();
     let args: Vec<String> = env::args().collect();
     if args.len() == 1 {
         usage();
         return;
     }
     if args[1] == "serve" {
+        let mp = Arc::new(Mutex::new (MessagePusher::new()));
         let port = args[2].parse::<u16>().unwrap();
-        serve(port).unwrap();
+        serve(port,  mp).unwrap();
     } else if args[1] == "client" {
         let host = &args[2];
         let port = args[3].parse::<u16>().unwrap();
