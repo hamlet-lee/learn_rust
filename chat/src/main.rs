@@ -187,6 +187,8 @@ struct MessagePusherInner {
     sender_map: HashMap<u64, Sender<Msg>>,
     next_id: u64
 }
+
+#[derive(Clone)]
 struct MessagePusher {
     inner: Arc<Mutex<MessagePusherInner>>
 }
@@ -219,25 +221,37 @@ impl MessagePusher {
         let (tx_peer, rx_op) = mpsc::channel();
 
         let self_in_thread = self.inner.clone();
-        // learn from https://users.rust-lang.org/t/how-to-use-self-while-spawning-a-thread-from-method/8282
+        // 1) learn from https://users.rust-lang.org/t/how-to-use-self-while-spawning-a-thread-from-method/8282
+        // 2) learn from https://www.philipdaniels.com/blog/2020/self-cloning-for-multiple-threads-in-rust/
+
+        let other_self = self.clone();  // 2)
         thread::spawn( move | | {
             'outer: loop {
                 let s = rx_op.recv().unwrap();
                 match s {
                     Msg::TextMsg(txt) => {
-                        let mut inner = self_in_thread.lock().unwrap();
-                        MessagePusher::push_msg(&mut inner.sender_map, &txt);
+                        // let mut inner = self_in_thread.lock().unwrap();
+                        // MessagePusher::push_msg(&mut inner.sender_map, &txt);
+                        other_self.push_msg_simple(&txt);
                     }
                     Msg::EndMsg => {
                         let mut inner = self_in_thread.lock().unwrap();
                         MessagePusher::close(&mut inner.sender_map, cur_id);
-                        break 'outer
+                        break 'outer;
                     }
                 }
             }
         });
 
         (rx_peer, tx_peer)
+    }
+
+    fn push_msg_simple(&self, msg: &str) {
+        log::debug!("push_msg : {}", msg);
+        for (id, tx) in &self.inner.lock().unwrap().sender_map {
+            log::debug!("tx({}).send : {}", id, msg);
+            tx.send(Msg::TextMsg(msg.to_owned())).unwrap();
+        }
     }
 
     fn push_msg(sender_map: &mut HashMap<u64, Sender<Msg>>, msg: &str) {
