@@ -138,13 +138,10 @@ fn message_sender (mut stream: TcpStream, rx: Receiver<Msg>) {
     }
 }
 
-fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
+fn handle_client(stream: TcpStream, mut mp: MessagePusherV2) {
     let mut client_name: String = "UNKNOWN".to_owned();
 
-    let (rx, tx) = {
-        let mut mp = arc_mp.lock().unwrap();
-        mp.new_pair()   
-    };
+    let (rx, tx) = mp.new_pair();
     
     let stream_for_sender = stream.try_clone().unwrap();
     thread::spawn( || {
@@ -152,11 +149,6 @@ fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
     });
 
     read_stream_line(stream, move |s| {
-
-        // let mut m = {
-        //     arc_mp.lock().unwrap()
-        // };
-
         if s == "bye" {
             let msg = format!("{} 离开了 ...", client_name);
             println!("{}", msg);
@@ -191,6 +183,12 @@ struct MessagePusherInner {
 #[derive(Clone)]
 struct MessagePusher {
     inner: Arc<Mutex<MessagePusherInner>>
+}
+
+#[derive(Clone)]
+struct MessagePusherV2 {
+    sender_map: Arc<Mutex<HashMap<u64, Sender<Msg>>>>,
+    next_id: Arc<Mutex<u64>>
 }
 
 impl MessagePusher {
@@ -270,16 +268,85 @@ impl MessagePusher {
     }
 }
 
-fn serve(port: u16, arc_mp: Arc<Mutex<MessagePusher>>) -> std::io::Result<()> {
+impl MessagePusherV2 {
+    fn new() -> MessagePusherV2 {
+        MessagePusherV2 {
+            sender_map: Arc::new(Mutex::new(
+                HashMap::new()
+            )),
+            next_id: Arc::new(Mutex::new(1))
+        }
+    }
+
+    // ret 1: for receive msg (sent by anyone)
+    // ret 2: for send msg (to everyone)
+    fn new_pair(&mut self) -> (Receiver<Msg>, Sender<Msg>) {
+        let (tx_op, rx_peer) = mpsc::channel();
+
+        let local_self = &self;
+
+        let cur_id;
+        {
+            let mut locked_next_id = local_self.next_id.lock().unwrap();
+            cur_id = *locked_next_id;
+            *locked_next_id += 1;
+        }
+
+        {
+            local_self.sender_map.lock().unwrap().insert(cur_id, tx_op.clone());
+        }
+
+        let (tx_peer, rx_op) = mpsc::channel();
+
+        // 1) learn from https://users.rust-lang.org/t/how-to-use-self-while-spawning-a-thread-from-method/8282
+        // 2) learn from https://www.philipdaniels.com/blog/2020/self-cloning-for-multiple-threads-in-rust/
+
+        let other_self = self.clone();  // 2)
+        thread::spawn( move | | {
+            'outer: loop {
+                let s = rx_op.recv().unwrap();
+                match s {
+                    Msg::TextMsg(txt) => {
+                        other_self.push_msg(&txt);
+                    }
+                    Msg::EndMsg => {
+                        other_self.close(cur_id);
+                        break 'outer;
+                    }
+                }
+            }
+        });
+
+        (rx_peer, tx_peer)
+    }
+
+    fn push_msg(&self, msg: &str) {
+        log::debug!("push_msg : {}", msg);
+        //* 解开MutextGuard，得到对象; & 采用借用方式
+        for (id, tx) in &*(self.sender_map.lock().unwrap()) {
+            log::debug!("tx({}).send : {}", id, msg);
+            tx.send(Msg::TextMsg(msg.to_owned())).unwrap();
+        }
+    }
+
+    fn close (&self, id: u64) {
+        let sender = self.sender_map.lock().unwrap().remove(&id);
+        if let Some(s) = sender {
+            s.send(Msg::EndMsg).unwrap();
+        }
+    }
+}
+
+fn serve(port: u16, mp: MessagePusherV2) -> std::io::Result<()> {
     println!("Listening on port {} ...", port);
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))?;
 
     for stream in listener.incoming() {
         println!("A client is connected!");
         let stream = stream.unwrap();
-        let arc_mp_for_client = arc_mp.clone();
+        let mp_cloned = mp.clone();
         std::thread::spawn(move || {
-            handle_client(stream, arc_mp_for_client);
+            handle_client(stream, mp_cloned);
         });
 
     }
@@ -367,7 +434,7 @@ fn main() {
         return;
     }
     if args[1] == "serve" {
-        let mp = Arc::new(Mutex::new (MessagePusher::new()));
+        let mp = MessagePusherV2::new();
         let port = args[2].parse::<u16>().unwrap();
         serve(port,  mp).unwrap();
     } else if args[1] == "client" {
