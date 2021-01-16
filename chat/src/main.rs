@@ -141,9 +141,9 @@ fn message_sender (mut stream: TcpStream, rx: Receiver<Msg>) {
 fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
     let mut client_name: String = "UNKNOWN".to_owned();
 
-    let (rx, id) = {
+    let (rx, tx) = {
         let mut mp = arc_mp.lock().unwrap();
-        mp.new_receiver()
+        mp.new_pair()   
     };
     
     let stream_for_sender = stream.try_clone().unwrap();
@@ -153,31 +153,29 @@ fn handle_client(stream: TcpStream, arc_mp: Arc<Mutex<MessagePusher>>) {
 
     read_stream_line(stream, move |s| {
 
-        let mut m = {
-            arc_mp.lock().unwrap()
-        };
+        // let mut m = {
+        //     arc_mp.lock().unwrap()
+        // };
 
         if s == "bye" {
             let msg = format!("{} 离开了 ...", client_name);
             println!("{}", msg);
-            m.push_msg(&msg);
-            m.close(id);
+            tx.send(Msg::TextMsg(msg));
+            tx.send(Msg::EndMsg);
             Action::STOP
         } else if s.starts_with("name: ") {
             client_name = s["name: ".len()..].to_owned();
             let msg = format!("{} 进来了 ...", client_name);
             println!("{}", msg);
-            m.push_msg(&msg);
+            tx.send(Msg::TextMsg(msg));
             Action::CONTINUE
         } else {
             let msg = format!("{} 说: {}", client_name, s);
             println!("{}", msg);
-            m.push_msg(&msg);
+            tx.send(Msg::TextMsg(msg));
             Action::CONTINUE
         }
     }).unwrap_or(0);
-
-    
 }
 
 enum Msg {
@@ -185,37 +183,73 @@ enum Msg {
     EndMsg
 }
 
-struct MessagePusher {
+struct MessagePusherInner {
     sender_map: HashMap<u64, Sender<Msg>>,
     next_id: u64
+}
+struct MessagePusher {
+    inner: Arc<Mutex<MessagePusherInner>>
 }
 
 impl MessagePusher {
     fn new() -> MessagePusher {
         MessagePusher {
-            sender_map: HashMap::new(),
-            next_id: 1
+            inner: Arc::new(Mutex::new(MessagePusherInner {
+                sender_map: HashMap::new(),
+                next_id: 1
+            }))
         }
     }
 
-    fn new_receiver(&mut self) -> (Receiver<Msg>, u64) {
-        let (tx, rx) = mpsc::channel();
-        let id = self.next_id;
-        self.next_id += 1;
-        self.sender_map.insert(id, tx.clone());
-        (rx, id)
+    // ret 1: for receive msg (sent by anyone)
+    // ret 2: for send msg (to everyone)
+    fn new_pair(&mut self) -> (Receiver<Msg>, Sender<Msg>) {
+        let (tx_op, rx_peer) = mpsc::channel();
+
+        let local_self = &self.inner;
+
+        let cur_id;
+        {
+            let mut state = local_self.lock().unwrap();
+            cur_id = state.next_id;
+            state.next_id += 1;
+            state.sender_map.insert(cur_id, tx_op.clone());
+        }
+
+        let (tx_peer, rx_op) = mpsc::channel();
+
+        let self_in_thread = self.inner.clone();
+        // learn from https://users.rust-lang.org/t/how-to-use-self-while-spawning-a-thread-from-method/8282
+        thread::spawn( move | | {
+            'outer: loop {
+                let s = rx_op.recv().unwrap();
+                match s {
+                    Msg::TextMsg(txt) => {
+                        let mut inner = self_in_thread.lock().unwrap();
+                        MessagePusher::push_msg(&mut inner.sender_map, &txt);
+                    }
+                    Msg::EndMsg => {
+                        let mut inner = self_in_thread.lock().unwrap();
+                        MessagePusher::close(&mut inner.sender_map, cur_id);
+                        break 'outer
+                    }
+                }
+            }
+        });
+
+        (rx_peer, tx_peer)
     }
 
-    fn push_msg(&self, msg: &str) {
+    fn push_msg(sender_map: &mut HashMap<u64, Sender<Msg>>, msg: &str) {
         log::debug!("push_msg : {}", msg);
-        for (id, tx) in &self.sender_map {
+        for (id, tx) in sender_map {
             log::debug!("tx({}).send : {}", id, msg);
             tx.send(Msg::TextMsg(msg.to_owned())).unwrap();
         }
     }
 
-    fn close(&mut self, id: u64) {
-        let sender = self.sender_map.remove(&id);
+    fn close (sender_map: &mut HashMap<u64, Sender<Msg>>, id: u64) {
+        let sender = sender_map.remove(&id);
         if let Some(s) = sender {
             s.send(Msg::EndMsg).unwrap();
         }
