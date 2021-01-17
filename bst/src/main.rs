@@ -45,13 +45,15 @@ impl Tree {
         }
     }
 
-    fn traverse(&self, cb: impl Fn(u64) ) {
+    // 需要加上 Copy Trait 的限定！否则会报错
+    fn traverse<F>(&self, cb: F ) where F: Fn(u64)  + Copy {
         if let Some(tn) = &self.root {
             Tree::traverse_inner(tn, cb);
         }
     }
 
-    fn traverse_inner(tn: &TreeNode, cb: impl Fn(u64) ) {
+    // 需要加上 Copy Trait 的限定！否则会报错
+    fn traverse_inner<F> (tn: &TreeNode, cb: F ) where F: Fn(u64) + Copy {
         match &tn.left {
             Some(tleft) => {
                 Self::traverse_inner(&tleft, cb);
