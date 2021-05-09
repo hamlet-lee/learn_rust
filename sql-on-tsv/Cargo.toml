@@ -1,0 +1,12 @@
+[package]
+name = "sql-on-tsv"
+version = "0.1.0"
+authors = ["Sining Li <lisining@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+sqlite = "0.26.0"
+regex = "1.5"
+
